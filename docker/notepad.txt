@@ -14,4 +14,14 @@
 
 systemctl restart docker.service
 
+登录docker
+docker login 
+
+删除镜像
+docker rmi [OPTIONS] IMAGE [IMAGE...]
+上传镜像
+docker push [OPTIONS] NAME[:TAG]
+下载镜像
+docker pull [OPTIONS] NAME[:TAG|@DIGEST]
+
 删除已退出的容器 for i in `docker ps -a |grep -i exited |awk '{print $1}'`;do docker rm -f $i;done
