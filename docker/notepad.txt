@@ -23,5 +23,25 @@ docker rmi [OPTIONS] IMAGE [IMAGE...]
 docker push [OPTIONS] NAME[:TAG]
 下载镜像
 docker pull [OPTIONS] NAME[:TAG|@DIGEST]
+从容器中保存一个新的镜像
+docker commit [OPTIONS] CONTAINER [REPOSITORY[:TAG]]
+导出
+docker save [OPTIONS] IMAGE [IMAGE...] >xx.tar
+导入
+docker load [OPTIONS] <xx.tar
+启动/停止/重启容器
+docker start/stop/restart [OPTIONS] CONTAINER [CONTAINER...]
+查看docker日志
+docker logs [OPTIONS] CONTAINER
+给容器命名
+docker run --name 容器名称
+映射端口
+docker run -p 容器外部端口:内部端口
+挂载数据卷
+docker run -v 宿主机目录:内部目录
+查看容器的信息
+docker inspect [OPTIONS] NAME|ID [NAME|ID...]
+传递环境变量
+docker run -e KEY=VALUE  
 
 删除已退出的容器 for i in `docker ps -a |grep -i exited |awk '{print $1}'`;do docker rm -f $i;done
