@@ -1,1 +1,17 @@
+安装dokcer
+  yum install docker  
+配置国内源
+  编辑/etc/docker/daemon.json
+  添加:
+{
+    "registry-mirrors" : [
+    "https://registry.docker-cn.com",
+    "https://docker.mirrors.ustc.edu.cn",
+    "http://hub-mirror.c.163.com",
+    "https://cr.console.aliyun.com/"
+  ]
+}
+
+systemctl restart docker.service
+
 删除已退出的容器 for i in `docker ps -a |grep -i exited |awk '{print $1}'`;do docker rm -f $i;done
