@@ -73,3 +73,181 @@
 	$TTL	60	; 1 minute
 	dns	A	10.4.7.11
 
+### step 6 启动服务
+	systemctl start named
+	netstat -anp|grep 53 #检查服务
+	dig -t A hdss7-21.host.com @10.4.7.11 +short
+	sed -i 's/nameserver.*/nameserver 10.4.7.11/' /etc/resolv.conf  #更改dns server
+
+## 准备证书签发环境
+
+### step 1 安装cfssl
+	curl -s -L -o /bin/cfssl https://pkg.cfssl.org/R1.2/cfssl_linux-amd64
+	curl -s -L -o /bin/cfssljson https://pkg.cfssl.org/R1.2/cfssljson_linux-amd64
+	curl -s -L -o /bin/cfssl-certinfo https://pkg.cfssl.org/R1.2/cfssl-certinfo_linux-amd64
+	chmod +x /bin/cfssl*
+### 集群相关证书类型
+**client certificate**： 用于服务端认证客户端,例如etcdctl、etcd proxy、fleetctl、docker客户端
+
+**server certificate**: 服务端使用，客户端以此验证服务端身份,例如docker服务端、kube-apiserver
+
+**peer certificate**: 双向证书，用于etcd集群成员间通信
+
+根据认证对象可以将证书分成三类：服务器证书<u>server cert</u>，客户端证书<u>client cert</u>，对等证书<u>peer cert</u>(表示既是server cert又是client cert)，在kubernetes 集群中需要的证书种类如下：
+
+* etcd 节点需要标识自己服务的server cert，也需要client cert与etcd集群其他节点交互，当然可以分别指定2个证书，也可以使用一个对等证书
+* master 节点需要标识 apiserver服务的server cert，也需要client cert连接etcd集群，这里也使用一个对等证书
+* kubectl calico kube-proxy 只需要client cert，因此证书请求中 hosts 字段可以为空
+* kubelet证书比较特殊，不是手动生成，它由node节点TLS BootStrap向apiserver请求，由master节点的controller-manager 自动签发，包含一个client cert 和一个server cert
+
+### step 2 创建CA证书签名请求
+
+
+**配置证书生成策略，规定CA可以颁发那种类型的证书**/opt/certs/ca-config.json
+
+	{
+		"signing": {
+			"default": {
+				"expiry": "175200h"
+			},
+			"profiles": {
+				"server": {
+					"expiry": "175200h",
+					"usages": [
+						"signing",
+						"key encipherment",
+						"server auth"
+					]
+				},
+				"client":{
+					"expiry": "175200h",
+					"usages": [
+						"signing",
+						"key encipherment",
+						"client auth"
+					]
+				},
+				"peer":{
+					"expiry": "175200h",
+					"usages": [
+						"signing",
+						"key encipherment",
+						"server auth",
+						"client auth"
+					]
+				}
+			}
+		}
+	}
+
+
+**编辑配置文件**/opt/certs/ca-csr.json
+
+	{
+		"CN": "ming",
+		"hosts":[
+		],
+		"key": {
+		    "algo": "rsa",
+		    "size": 2048
+		},
+		"names": [
+		    {
+		        "C": "CN",
+		        "L": "nanji",
+		        "ST": "nanji",  
+				"O": "jszh",          
+		        "OU": "zcb"
+		    }    
+		],
+		"ca" : {
+			"expiry": "175200h"
+		}
+	}
+**生成ca证书**
+
+	cd /opt/certs/
+	cfssl gencert -initca ca-csr.json |cfssljson -bare ca
+
+## 部署docker环境
+在HDSS7-200/21/22.host.com上部署docker
+
+### step 1安装
+	curl -fsSL https://get.docker.com |bash -s docker --mirror Aliyun
+
+### step 2 配置文件
+	mkdir /etc/docker
+	vi /etc/docker/daemon.json
+配置文件如下,注意根据需求修改bip
+
+	{
+		"graph":"/data/docker",
+		"storage-driver":"overlay2",
+		"insecure-registries": [],
+		"registry-mirrors": ["https://bv3z4ezp.mirror.aliyuncs.com"],
+		"bip":"172.7.21.1/24",
+		"exec-opts":["native.cgroupdriver=systemd"],
+		"live-restore":true
+	}
+启动docker
+	
+	mkdir /data/docker -p 
+	systemctl start docker
+	docker info
+
+## 部署etcd集群
+安装 hdss7-12/21/22.host.com 3台
+
+### step1 签发证书
+**创建etcd证书请求文件**
+在hdss7-11.host.com上执行
+
+	cd /opt/certs/
+	vi etcd-peer-csr.json
+内容为:
+
+	{
+	    "CN": "k8s-etcd",
+	    "hosts":[
+			"10.4.7.11",
+			"10.4.7.12",
+			"10.4.7.21",
+			"10.4.7.22"
+	    ],
+	    "key": {
+	        "algo": "rsa",
+	        "size": 2048
+	    },
+	    "names": [
+	        {
+	            "C": "CN",
+	            "L": "nanji",
+	            "ST": "nanji",  
+	            "O": "jszh",          
+	            "OU": "zcb"
+	        }    
+	    ]
+	}
+
+**生成证书**
+
+	cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=peer etcd-peer-csr.json |cfssljson -bare etcd-peer
+
+**添加etcd用户**
+
+	useradd  -s /sbin/nologin -M etcd
+
+**安装etcd**
+
+	wget https://github.com/etcd-io/etcd/releases/download/v3.1.19/etcd-v3.1.19-linux-amd64.tar.gz
+	tar xvf etcd-v3.1.19-linux-amd64.tar.gz -C /opt
+	cd /opt 
+	mv etcd-v3.1.19-linux-amd64/ etcd-v3.1.19
+	ln -s /opt/etcd-v3.1.19/ /opt/etcd
+	cd /opt/etcd
+	mkdir -p /opt/etcd/certs /data/etcd /data/logs/etcd-server
+**上传etcd证书**
+上传证书到/opt/etcd/certs目录下,
+* ca.pem
+* etcd-peer-key.pem
+* etcd-peer.pem
