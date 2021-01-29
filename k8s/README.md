@@ -1,4 +1,5 @@
 #安装k8s
+
 ##前期准备
 ###step 1 关闭selinux
 	sed -i 's/SELINUX=.*/SELINUX=disabled/g' /etc/selinux/config
