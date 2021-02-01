@@ -11,9 +11,15 @@
   
 ### step 3 关闭防火墙
 	systemctl stop firewalld
+	systemctl disable firewalld
 ### step 4 安装yum源,并安装必要的软件
 	curl -o /etc/yum.repos.d/epel.repo http://mirrors.aliyun.com/repo/epel-7.repo
 	yum install wget net-tools telnet tree nmap sysstat lrzsz dos2unix bind-utils -y
+	yum install supervisor -y
+启动supervisor,用还监控服务,挂掉后自动拉起来
+	
+	systemctl start  supervisord
+	systemctl enable supervisord
 ## 在dns服务器上安装dns服务
   安装bind9
 ### step 1
@@ -193,6 +199,7 @@
 	
 	mkdir /data/docker -p 
 	systemctl start docker
+	systemctl enable docker
 	docker info
 
 ## 部署etcd集群
@@ -233,6 +240,8 @@
 
 	cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=peer etcd-peer-csr.json |cfssljson -bare etcd-peer
 
+### step2 安装etcd
+
 **添加etcd用户**
 
 	useradd  -s /sbin/nologin -M etcd
@@ -248,6 +257,101 @@
 	mkdir -p /opt/etcd/certs /data/etcd /data/logs/etcd-server
 **上传etcd证书**
 上传证书到/opt/etcd/certs目录下,
+
 * ca.pem
 * etcd-peer-key.pem
 * etcd-peer.pem
+
+### step3 启动etcd
+
+在/opt/etcd/etcd-server-startup.sh中加入以下命令
+注意**listen-peer-urls**,**listen-client-urls**,**initial-advertise-peer-urls**,**advertise-client-urls**,**initial-cluster** 字段按需要进行更改,
+
+	#!/bin/sh
+	./etcd --name etcd-server-7-12 \
+	 --data-dir /data/etcd/etcd-server \
+	 --ca-file ./certs/ca.pem \
+	 --cert-file ./certs/etcd-peer.pem \
+	 --key-file ./certs/etcd-peer-key.pem \
+	 --client-cert-auth \
+	 --trusted-ca-file ./certs/ca.pem \
+	 --peer-ca-file ./certs/ca.pem \
+	 --peer-cert-file ./certs/etcd-peer.pem \
+	 --peer-key-file ./certs/etcd-peer-key.pem \
+	 --peer-client-cert-auth \
+	 --peer-trusted-ca-file ./certs/ca.pem \
+	 --listen-peer-urls https://10.4.7.12:2380 \
+	 --listen-client-urls https://10.4.7.12:2379,http://127.0.0.1:2379 \
+	 --initial-advertise-peer-urls https://10.4.7.12:2380 \
+	 --advertise-client-urls https://10.4.7.12:2379,http://127.0.0.1:2379 \
+	 --initial-cluster etcd-server-7-12=https://10.4.7.12:2380,etcd-server-7-21=https://10.4.7.21:2380,etcd-server-7-22=https://10.4.7.22:2380 \
+	 --log-output stdout
+更改权限
+
+	cd /opt/etcd
+	chmod +x etcd-server-startup.sh 
+	chown -R etcd:etcd /opt/etcd*
+	chown -R etcd:etcd /data/etcd/
+	chown -R etcd:etcd /data/logs/etcd-server -R
+
+把etcd加入到supervisor监控
+编辑/etc/supervisord.d/etcd-server.ini
+
+	#项目名
+	[program:etcd-server]
+	#脚本目录
+	directory=/opt/etcd
+	#脚本执行命令
+	command=/opt/etcd/etcd-server-startup.sh
+	#进程数
+	numproces=1
+	#supervisor启动的时候是否随着同时启动，默认True
+	autostart=true
+	#当程序exit的时候，这个program不会自动重启,默认unexpected，设置子进程挂掉后自动重启的情况，有三个选项，false,unexpected和true。如果为false的时候，无论什么情况下，都不会被重新启动，如果为unexpected，只有当进程的退出码不在下面的exitcodes里面定义的
+	autorestart=true
+	#这个选项是子进程启动多少秒之后，此时状态如果是running，则我们认为启动成功了。默认值为1
+	startsecs=30
+
+	startretries =3
+	
+	#脚本运行的用户身份 
+	user = etcd
+	
+	#日志输出 
+	stderr_logfile=/data/logs/etcd-server/etcd-server_err.log 
+	stdout_logfile=/data/logs/etcd-server/etcd-server_stdout.log 
+	#把stderr重定向到stdout，默认 false
+	redirect_stderr = true
+	#stdout日志文件大小，默认 50MB
+	stdout_logfile_maxbytes = 20MB
+	#stdout日志文件备份数
+	stdout_logfile_backups = 20
+
+启动
+	
+	supervisorctl update
+
+## 安装apiserver
+主机节点hdss7-21/22.host.com
+
+### step1 下载k8s
+在github上面搜索kubernetes,安装v1.20.2版本,下载地址
+
+	#需要科学上网
+	https://storage.googleapis.com/kubernetes-release/release/v1.20.2/kubernetes-server-linux-amd64.tar.gz
+	#百度云
+	https://pan.baidu.com/s/1cqbYRspvMlq33LqO7TnMcw
+	#提取码
+	ioux
+### step2 安装
+	#解压文件到/opt 下
+	tar xvf kubernetes-server-linux-amd64.tar.gz -C /opt/
+	cd /opt
+	mv kubernetes kubernetes-v1.20.2
+	ln -s kubernetes-v1.20.2 kubernetes
+
+### step3 签发client 证书
+此证书是用api-server和etcd通信使用的. api-server客户端,etcdserver端
+
+	
+	
