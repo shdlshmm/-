@@ -352,6 +352,85 @@
 
 ### step3 签发client 证书
 此证书是用api-server和etcd通信使用的. api-server客户端,etcdserver端
+在hdss7-11.host.com(签发证书服务器)上编辑/opt/certs/client-csr.json
+
+	{
+	    "CN": "k8s-node",
+	    "hosts":[
+	    ],
+	    "key": {
+	        "algo": "rsa",
+	        "size": 2048
+	    },
+	    "names": [
+	        {
+	            "C": "CN",
+	            "L": "nanji",
+	            "ST": "nanji",  
+	            "O": "jszh",          
+	            "OU": "zcb"
+	        }    
+	    ]
+	}
+
+生成证书
+
+	cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=client client-csr.json |cfssljson -bare client
+
+### step4 给apiserver签发证书
+调用apiserver时使用的证书,
+编辑/opt/certs/apiserver-csr.json
+
+	{
+	    "CN": "k8s-apiserver",
+	    "hosts":[
+			"127.0.0.1",
+			"192.168.0.1",
+			"10.4.7.1",
+			"10.4.7.10",
+			"10.4.7.11",
+			"10.4.7.12",
+			"10.4.7.21",
+			"10.4.7.22",
+			"10.4.7.200",
+			"kubernetes.default",
+			"kubernetes.default.svc",
+			"kubernetes.default.svc.cluster",
+			"kubernetes.default.svc.local"
+	    ],
+	    "key": {
+	        "algo": "rsa",
+	        "size": 2048
+	    },
+	    "names": [
+	        {
+	            "C": "CN",
+	            "L": "nanji",
+	            "ST": "nanji",  
+	            "O": "jszh",          
+	            "OU": "zcb"
+	        }    
+	    ]
+	}
+
+生成证书
+
+	cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=server apiserver-csr.json |cfssljson -bare apiserver
+
+上传证书到/opt/kubernetes/server/bin/certs
+
+	mkdir -p /opt/kubernetes/server/bin/certs
+* ca-key.pem
+* ca.pem
+* client-key.pem
+* client.pem
+* etcd-peer-key.pem
+* etcd-peer.pem
+### step5 添加配置文件
+
+	mkdir -p /opt/kubernetes/server/bin/conf
+	
+
 
 	
 	
