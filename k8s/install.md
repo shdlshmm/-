@@ -566,3 +566,580 @@
 	stderr_logfile_backups=4                                        ; # of stderr logfile backups (default 10)
 	stderr_capture_maxbytes=1MB                                     ; number of bytes in 'capturemode' (default 0)
 	stderr_events_enabled=false                                     ; emit events on stderr writes (default false)
+
+启动服务
+
+	supervisorctl update
+
+## apiserver 高可用
+hdss7-11/12.host.com
+### step1 nginx配置
+安装nginx
+
+	yum install nginx -y
+
+编辑`/etc/nginx/nginx.conf` 在最下方加入
+
+	stream {
+	    upstream kube-apiserver {
+	        server 10.4.7.21:6443     max_fails=3 fail_timeout=30s;
+	        server 10.4.7.22:6443     max_fails=3 fail_timeout=30s;
+	    }
+	    server {
+	        listen 7443;
+	        proxy_connect_timeout 2s;
+	        proxy_timeout 900s;
+	        proxy_pass kube-apiserver;
+	    }
+	}
+
+启动nginx
+	
+	systemctl start nginx
+	systemctl enable nginx
+
+### step2 keepalived
+hdss7-11/12.host.com
+安装keepalived
+
+	yum install keepalived -y
+编辑`/etc/keepalived/check_port.sh`
+	
+	#!/bin/bash
+	#keepalived 监控端口脚本
+	#使用方法：
+	#在keepalived的配置文件中
+	#vrrp_script check_port {#创建一个vrrp_script脚本,检查配置
+	#    script "/etc/keepalived/check_port.sh 6379" #配置监听的端口
+	#    interval 2 #检查脚本的频率,单位（秒）
+	#}
+	CHK_PORT=$1
+	if [ -n "$CHK_PORT" ];then
+	        PORT_PROCESS=`ss -ltn|grep $CHK_PORT|wc -l`
+	        if [ $PORT_PROCESS -eq 0 ];then
+	                echo "Port $CHK_PORT Is Not Used,End."
+	                exit 1
+	        fi
+	else
+	        echo "Check Port Cant Be Empty!"
+	fi
+
+配置keepalived
+编辑`/etc/keepalived/keepalived.conf` 
+主
+
+	! Configuration File for keepalived
+	
+	global_defs {
+	   router_id 10.4.7.11
+	
+	}
+	
+	vrrp_script chk_nginx {
+	    script "/etc/keepalived/check_port.sh 7443"
+	    interval 2
+	    weight -20
+	}
+	
+	vrrp_instance VI_1 {
+	    state MASTER
+	    interface ens33
+	    virtual_router_id 251
+	    priority 100
+	    advert_int 1
+	    mcast_src_ip 10.4.7.11
+	    nopreempt
+	
+	    authentication {
+	        auth_type PASS
+	        auth_pass 11111111
+	    }
+	    track_script {
+	         chk_nginx
+	    }
+	    virtual_ipaddress {
+	        10.4.7.10
+	    }
+	}
+
+备
+
+	! Configuration File for keepalived
+	global_defs {
+		router_id 10.4.7.12
+	}
+	vrrp_script chk_nginx {
+		script "/etc/keepalived/check_port.sh 7443"
+		interval 2
+		weight -20
+	}
+	vrrp_instance VI_1 {
+		state BACKUP
+		interface ens33
+		virtual_router_id 251
+		mcast_src_ip 10.4.7.12
+		priority 90
+		advert_int 1
+		authentication {
+			auth_type PASS
+			auth_pass 11111111
+		}
+		track_script {
+			chk_nginx
+		}
+		virtual_ipaddress {
+			10.4.7.10
+		}
+	}
+
+启动keepalived
+
+	chmod +x /etc/keepalived/check_port.sh
+	systemctl start keepalived
+	systemctl enable keepalived
+	ip addr |grep 10.4.7.10
+## 部署controller-manager
+hdss7-21/22.host.com
+
+### step 1 创建启动脚本
+
+编辑`/opt/kubernetes/server/bin/kube-controller-manager.sh`
+
+	#!/bin/sh
+	./kube-controller-manager \
+	  --cluster-cidr 172.7.0.0/16 \
+	  --leader-elect true \
+	  --log-dir /data/logs/kubernetes/kube-controller-manager \
+	  --master http://127.0.0.1:8080 \
+	  --service-account-private-key-file ./certs/ca-key.pem \
+	  --service-cluster-ip-range 192.168.0.0/16 \
+	  --root-ca-file ./certs/ca.pem \
+	  --v 2
+
+### step 2 调整文件权限，创建目录
+
+	cd /opt/kubernetes/server/bin
+	chmod +x /opt/kubernetes/server/bin/kube-controller-manager.sh
+	mkdir -p /data/logs/kubernetes/kube-controller-manager
+
+### step3 启动程序
+
+编辑`/etc/supervisord.d/kube-conntroller-manager.ini`
+
+	[program:kube-controller-manager]
+	command=/opt/kubernetes/server/bin/kube-controller-manager.sh                     ; the program (relative uses PATH, can take args)
+	numprocs=1                                                                        ; number of processes copies to start (def 1)
+	directory=/opt/kubernetes/server/bin                                              ; directory to cwd to before exec (def no cwd)
+	autostart=true                                                                    ; start at supervisord start (default: true)
+	autorestart=true                                                                  ; retstart at unexpected quit (default: true)
+	startsecs=22                                                                      ; number of secs prog must stay running (def. 1)
+	startretries=3                                                                    ; max # of serial start failures (default 3)
+	exitcodes=0,2                                                                     ; 'expected' exit codes for process (default 0,2)
+	stopsignal=QUIT                                                                   ; signal used to kill process (default TERM)
+	stopwaitsecs=10                                                                   ; max num secs to wait b4 SIGKILL (default 10)
+	user=root                                                                         ; setuid to this UNIX account to run the program
+	redirect_stderr=false                                                             ; redirect proc stderr to stdout (default false)
+	stdout_logfile=/data/logs/kubernetes/kube-controller-manager/controll.stdout.log  ; stdout log path, NONE for none; default AUTO
+	stdout_logfile_maxbytes=64MB                                                      ; max # logfile bytes b4 rotation (default 50MB)
+	stdout_logfile_backups=4                                                          ; # of stdout logfile backups (default 10)
+	stdout_capture_maxbytes=1MB                                                       ; number of bytes in 'capturemode' (default 0)
+	stdout_events_enabled=false                                                       ; emit events on stdout writes (default false)
+	stderr_logfile=/data/logs/kubernetes/kube-controller-manager/controll.stderr.log  ; stderr log path, NONE for none; default AUTO
+	stderr_logfile_maxbytes=64MB                                                      ; max # logfile bytes b4 rotation (default 50MB)
+	stderr_logfile_backups=4                                                          ; # of stderr logfile backups (default 10)
+	stderr_capture_maxbytes=1MB                                                       ; number of bytes in 'capturemode' (default 0)
+	stderr_events_enabled=false                                                       ; emit events on stderr writes (default false)
+
+启动程序
+	
+	supervisorctl update
+
+## 部署kube-scheduler
+hdss7-21/22.host.com
+
+### step 1 创建启动脚本
+编辑`/opt/kubernetes/server/bin/kube-scheduler.sh`
+
+	#!/bin/sh
+	./kube-scheduler \
+	  --leader-elect  \
+	  --log-dir /data/logs/kubernetes/kube-scheduler \
+	  --master http://127.0.0.1:8080 \
+	  --v 2
+
+### step2 调整文件权限，创建目录
+	chmod +x /opt/kubernetes/server/bin/kube-scheduler.sh
+	mkdir -p /data/logs/kubernetes/kube-scheduler
+### step3 启动程序
+编辑`/etc/supervisord.d/kube-scheduler.ini`
+
+	[program:kube-scheduler]
+	command=/opt/kubernetes/server/bin/kube-scheduler.sh                     ; the program (relative uses PATH, can take args)
+	numprocs=1                                                               ; number of processes copies to start (def 1)
+	directory=/opt/kubernetes/server/bin                                     ; directory to cwd to before exec (def no cwd)
+	autostart=true                                                           ; start at supervisord start (default: true)
+	autorestart=true                                                         ; retstart at unexpected quit (default: true)
+	startsecs=22                                                             ; number of secs prog must stay running (def. 1)
+	startretries=3                                                           ; max # of serial start failures (default 3)
+	exitcodes=0,2                                                            ; 'expected' exit codes for process (default 0,2)
+	stopsignal=QUIT                                                          ; signal used to kill process (default TERM)
+	stopwaitsecs=10                                                          ; max num secs to wait b4 SIGKILL (default 10)
+	user=root                                                                ; setuid to this UNIX account to run the program
+	redirect_stderr=false                                                    ; redirect proc stderr to stdout (default false)
+	stdout_logfile=/data/logs/kubernetes/kube-scheduler/scheduler.stdout.log ; stdout log path, NONE for none; default AUTO
+	stdout_logfile_maxbytes=64MB                                             ; max # logfile bytes b4 rotation (default 50MB)
+	stdout_logfile_backups=4                                                 ; # of stdout logfile backups (default 10)
+	stdout_capture_maxbytes=1MB                                              ; number of bytes in 'capturemode' (default 0)
+	stdout_events_enabled=false                                              ; emit events on stdout writes (default false)
+	stderr_logfile=/data/logs/kubernetes/kube-scheduler/scheduler.stderr.log ; stderr log path, NONE for none; default AUTO
+	stderr_logfile_maxbytes=64MB                                             ; max # logfile bytes b4 rotation (default 50MB)
+	stderr_logfile_backups=4                                                 ; # of stderr logfile backups (default 10)
+	stderr_capture_maxbytes=1MB                                              ; number of bytes in 'capturemode' (default 0)
+	stderr_events_enabled=false                                              ; emit events on stderr writes (default false)
+
+启动程序
+	
+	supervisorctl update
+
+### 部署kubelet
+hdss7-21/22.host.com
+
+### step1 签发kubelet证书
+
+在证书服务器hdss7-11上编辑`/opt/certs/kubelet-csr.json`
+
+	{
+	    "CN": "kubelet-node",
+	    "hosts": [
+	    "127.0.0.1",
+	    "10.4.7.10",
+	    "10.4.7.21",
+	    "10.4.7.22",
+	    "10.4.7.23",
+	    "10.4.7.24",
+	    "10.4.7.25",
+	    "10.4.7.26",
+	    "10.4.7.27",
+	    "10.4.7.28"
+	    ],
+	    "key": {
+	        "algo": "rsa",
+	        "size": 2048
+	    },
+	     "names": [
+	        {
+	            "C": "CN",
+	            "L": "nanji",
+	            "ST": "nanji",  
+	            "O": "jszh",          
+	            "OU": "zcb"
+	        }    
+	    ]
+	}
+
+生成kubelet证书和私钥
+
+	cd /opt/certs
+	cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=server kubelet-csr.json | cfssljson -bare kubelet
+
+把证书上传到hdss7-21/22的`/opt/kubernetes/server/bin/certs`目录下
+
+* **kubelet-key.pem**
+* **kubelet.pem**
+
+
+### step2 创建配置
+创建软连接
+
+	ln -s /opt/kubernetes/server/bin/kubectl /usr/bin/kubectl
+
+**set-cluster**
+	
+	mkdir /opt/kubernetes/server/bin/conf -p
+	cd /opt/kubernetes/server/conf
+	kubectl config set-cluster myk8s \
+	  --certificate-authority=/opt/kubernetes/server/bin/certs/ca.pem \
+	  --embed-certs=true \
+	  --server=https://10.4.7.10:7443 \
+	  --kubeconfig=kubelet.kubeconfig
+
+**set-credentials**
+
+	cd /opt/kubernetes/server/bin/conf
+	kubectl config set-credentials k8s-node \
+	 --client-certificate=/opt/kubernetes/server/bin/certs/client.pem \
+	 --client-key=/opt/kubernetes/server/bin/certs/client-key.pem \
+	 --embed-certs=true --kubeconfig=kubelet.kubeconfig 
+	
+**set-context**
+
+	cd /opt/kubernetes/server/bin/conf
+	kubectl config set-context myk8s-context \
+	  --cluster=myk8s \
+	  --user=k8s-node \
+	  --kubeconfig=kubelet.kubeconfig
+
+**use-context**
+
+	cd /opt/kubernetes/server/bin/conf
+	kubectl config use-context myk8s-context --kubeconfig=kubelet.kubeconfig
+创建完成后把`/opt/kubernetes/server/conf/bin/kubelet.kubeconfig` 同步到其他运算节点
+
+**创建资源配置文件**
+
+编辑`/opt/kubernetes/server/bin/conf/k8s-node.yaml`
+
+	apiVersion: rbac.authorization.k8s.io/v1
+	kind: ClusterRoleBinding
+	metadata:
+	  name: k8s-node
+	roleRef:
+	  apiGroup: rbac.authorization.k8s.io
+	  kind: ClusterRole
+	  name: system:node
+	subjects:
+	- apiGroup: rbac.authorization.k8s.io
+	  kind: User
+	  name: k8s-node
+**应用资源配置文件**
+
+	cd /opt/kubernetes/server/bin/conf
+	kubectl create -f k8s-node.yaml
+	kubectl get clusterrolebinding k8s-node
+
+**查看etcd中配置文件
+
+	export ETCDCTL_API=3
+	/opt/etcd/etcdctl get / --prefix --keys-only 
+
+### step3 启动kubelet
+准备基础镜像
+**此处应该放到私有仓库**
+
+	docker pull kubernetes/pause
+**创建kubelet启动脚本**
+
+主机hdss7-21.host.com
+
+编辑`/opt/kubernetes/server/bin/kubelet.sh`
+
+	#!/bin/sh
+	./kubelet \
+	  --anonymous-auth=false \
+	  --cgroup-driver systemd \
+	  --cluster-dns 192.168.0.2 \
+	  --cluster-domain cluster.local \
+	  --runtime-cgroups=/systemd/system.slice --kubelet-cgroups=/systemd/system.slice \
+	  --fail-swap-on="false" \
+	  --client-ca-file ./certs/ca.pem \
+	  --tls-cert-file ./certs/kubelet.pem \
+	  --tls-private-key-file ./certs/kubelet-key.pem \
+	  --hostname-override 10.4.7.21 \
+	  --image-gc-high-threshold 20 \
+	  --image-gc-low-threshold 10 \
+	  --kubeconfig ./conf/kubelet.kubeconfig \
+	  --log-dir /data/logs/kubernetes/kube-kubelet \
+	  --pod-infra-container-image kubernetes/pause:latest \
+	  --root-dir /data/kubelet
+
+ps.每个节点的主机配置稍有不通,注意`--hostname-override`
+
+**启动节点**
+
+	chmod +x /opt/kubernetes/server/bin/kubelet.sh
+	mkdir -p /data/logs/kubernetes/kube-kubelet /data/kubelet
+
+编辑`/etc/supervisord.d/kube-kubelet.ini`
+
+	[program:kube-kubelet]
+	command=/opt/kubernetes/server/bin/kubelet.sh                 ; the program (relative uses PATH, can take args)
+	numprocs=1                                                        ; number of processes copies to start (def 1)
+	directory=/opt/kubernetes/server/bin                              ; directory to cwd to before exec (def no cwd)
+	autostart=true                                                    ; start at supervisord start (default: true)
+	autorestart=true              									  ; retstart at unexpected quit (default: true)
+	startsecs=22                  									  ; number of secs prog must stay running (def. 1)
+	startretries=3                									  ; max # of serial start failures (default 3)
+	exitcodes=0,2                 									  ; 'expected' exit codes for process (default 0,2)
+	stopsignal=QUIT               									  ; signal used to kill process (default TERM)
+	stopwaitsecs=10               									  ; max num secs to wait b4 SIGKILL (default 10)
+	user=root                                                         ; setuid to this UNIX account to run the program
+	redirect_stderr=false                                             ; redirect proc stderr to stdout (default false)
+	stdout_logfile=/data/logs/kubernetes/kube-kubelet/kubelet.stdout.log   ; stdout log path, NONE for none; default AUTO
+	stdout_logfile_maxbytes=64MB                                      ; max # logfile bytes b4 rotation (default 50MB)
+	stdout_logfile_backups=4                                          ; # of stdout logfile backups (default 10)
+	stdout_capture_maxbytes=1MB                                       ; number of bytes in 'capturemode' (default 0)
+	stdout_events_enabled=false                                       ; emit events on stdout writes (default false)
+	stderr_logfile=/data/logs/kubernetes/kube-kubelet/kubelet.stderr.log   ; stderr log path, NONE for none; default AUTO
+	stderr_logfile_maxbytes=64MB                                      ; max # logfile bytes b4 rotation (default 50MB)
+	stderr_logfile_backups=4                                          ; # of stderr logfile backups (default 10)
+	stderr_capture_maxbytes=1MB   									  ; number of bytes in 'capturemode' (default 0)
+	stderr_events_enabled=false   									  ; emit events on stderr writes (default false)
+
+**启动**
+	
+	
+	supervisorctl update
+
+**检查节点**
+
+	kubectl get node
+**添加ROLES**
+	
+	kubectl label node 10.4.7.21 node-role.kubernetes.io/master=
+	kubectl label node 10.4.7.21 node-role.kubernetes.io/node=
+	kubectl label node 10.4.7.22 node-role.kubernetes.io/master=
+	kubectl label node 10.4.7.22 node-role.kubernetes.io/node=
+
+## 部署kube-proxy
+
+### step 1签发证书
+hdss7-11.host.com
+编辑`/opt/certs/kube-proxy-csr.json`
+
+	{
+	    "CN": "system:kube-proxy",
+	    "key": {
+	        "algo": "rsa",
+	        "size": 2048
+	    },
+	    "names": [
+		        {
+	            "C": "CN",
+	            "L": "nanji",
+	            "ST": "nanji",  
+	            "O": "jszh",          
+	            "OU": "zcb"
+	        }    
+	    ]
+	}
+	
+生成证书
+
+	cd /opt/certs
+	cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=client kube-proxy-csr.json | cfssljson -bare kube-proxy-client
+
+上次证书到运算节点`/opt/kubernetes/server/bin/certs`
+
+* kube-proxy-client-key.pem
+* kube-proxy-client.pem
+
+**安装lvs**
+
+	yum install ipvsadm -y
+
+### step2 创建配置
+
+**set-cluster**
+
+	cd /opt/kubernetes/server/bin/conf
+	kubectl config set-cluster myk8s \
+	  --certificate-authority=/opt/kubernetes/server/bin/certs/ca.pem \
+	  --embed-certs=true \
+	  --server=https://10.4.7.10:7443 \
+	  --kubeconfig=kube-proxy.kubeconfig
+
+**set-credentials**
+	
+	cd /opt/kubernetes/server/bin/conf
+	kubectl config set-credentials kube-proxy \
+	  --client-certificate=/opt/kubernetes/server/bin/certs/kube-proxy-client.pem \
+	  --client-key=/opt/kubernetes/server/bin/certs/kube-proxy-client-key.pem \
+	  --embed-certs=true \
+	  --kubeconfig=kube-proxy.kubeconfig
+	
+**set-context**
+		
+	cd /opt/kubernetes/server/bin/conf
+	kubectl config set-context myk8s-context \
+	  --cluster=myk8s \
+	  --user=kube-proxy \
+	  --kubeconfig=kube-proxy.kubeconfig
+
+**use-context**
+	
+	cd /opt/kubernetes/server/bin/conf
+	kubectl config use-context myk8s-context --kubeconfig=kube-proxy.kubeconfig
+
+ps.把kube-proxy.kubeconfig 上传至其他节点`/opt/kubernetes/server/bin/conf`下
+
+
+### step 3 创建kube-proxy启动脚本
+
+编辑 `/opt/kubernetes/server/bin/kube-proxy.sh`
+
+	#!/bin/sh
+	./kube-proxy \
+	  --cluster-cidr 172.7.0.0/16 \
+	  --hostname-override 10.4.7.21 \
+	  --proxy-mode=ipvs \
+	  --ipvs-scheduler=nq \
+	  --kubeconfig ./conf/kube-proxy.kubeconfig
+
+ps. 其他节点做响应修改
+
+	chmod +x /opt/kubernetes/server/bin/kube-proxy.sh
+	mkdir -p /data/logs/kubernetes/kube-proxy
+
+编辑`/etc/supervisord.d/kube-proxy.ini`
+
+
+	[program:kube-proxy]
+	command=/opt/kubernetes/server/bin/kube-proxy.sh                 ; the program (relative uses PATH, can take args)
+	numprocs=1                                                           ; number of processes copies to start (def 1)
+	directory=/opt/kubernetes/server/bin                                 ; directory to cwd to before exec (def no cwd)
+	autostart=true                                                       ; start at supervisord start (default: true)
+	autorestart=true                                                     ; retstart at unexpected quit (default: true)
+	startsecs=22                                                         ; number of secs prog must stay running (def. 1)
+	startretries=3                                                       ; max # of serial start failures (default 3)
+	exitcodes=0,2                                                        ; 'expected' exit codes for process (default 0,2)
+	stopsignal=QUIT                                                      ; signal used to kill process (default TERM)
+	stopwaitsecs=10                                                      ; max num secs to wait b4 SIGKILL (default 10)
+	user=root                                                		         ; setuid to this UNIX account to run the program
+	redirect_stderr=false                                           		 ; redirect proc stderr to stdout (default false)
+	stdout_logfile=/data/logs/kubernetes/kube-proxy/proxy.stdout.log     ; stdout log path, NONE for none; default AUTO
+	stdout_logfile_maxbytes=64MB                                    		 ; max # logfile bytes b4 rotation (default 50MB)
+	stdout_logfile_backups=4                                        		 ; # of stdout logfile backups (default 10)
+	stdout_capture_maxbytes=1MB                                     		 ; number of bytes in 'capturemode' (default 0)
+	stdout_events_enabled=false                                     		 ; emit events on stdout writes (default false)
+	stderr_logfile=/data/logs/kubernetes/kube-proxy/proxy.stderr.log     ; stderr log path, NONE for none; default AUTO
+	stderr_logfile_maxbytes=64MB                                    		 ; max # logfile bytes b4 rotation (default 50MB)
+	stderr_logfile_backups=4                                        		 ; # of stderr logfile backups (default 10)
+	stderr_capture_maxbytes=1MB   						                           ; number of bytes in 'capturemode' (default 0)
+	stderr_events_enabled=false   						                           ; emit events on stderr writes (default false)
+
+**启动**
+	
+	supervisorctl  update
+
+**验证**
+	
+	ipvsadm -Ln  
+	kubectl get svc
+
+##验证kubernetes集群##
+
+编辑`/root/nginx-ds.yaml`
+
+	apiVersion: extensions/v1beta1
+	kind: DaemonSet
+	metadata:
+	  name: nginx-ds
+	  labels:
+	    addonmanager.kubernetes.io/mode: Reconcile
+	spec:
+	  template:
+	    metadata:
+	      labels:
+	        app: nginx-ds
+	    spec:
+	      containers:
+	      - name: my-nginx
+	        image: nginx:1.7.9
+	        ports:
+	        - containerPort: 80
+
+**应用资源配置，并检查**
+
+	kubectl create -f nginx-ds.yaml
+	kubectl get pods
+	kubectl get pods -o wide
